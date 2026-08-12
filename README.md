@@ -11,7 +11,81 @@ See the gif below for a demo:
 
 I discovered the [Deep Live Cam](https://github.com/hacksider/Deep-Live-Cam) project and tried to run it on my M1 MacBook, but only got 0.5 FPS. So I wanted to explore how fast and at what latency you could get this to run on a remote server via WebRTC.
 
+## Deploying from GitHub
+
+If you would rather not install anything locally, the workflows in
+[.github/workflows](.github/workflows) run the tests and deploy to Modal for
+you. Pushing to `main` deploys; opening a pull request just runs the checks.
+
+### Accounts you need
+
+| Account | What for | Cost |
+| --- | --- | --- |
+| [GitHub](https://github.com) | Runs the workflows. | Free for public repos. |
+| [Modal](https://modal.com) | Runs the GPU backend. | Pay per second of GPU time. |
+| [Cloudflare](https://dash.cloudflare.com) | *Optional.* TURN relay, needed for cellular networks. Also a custom domain if you want one. | Free tier covers the key; relayed traffic is billed per GB. |
+
+Nothing else. No Hugging Face account — the model weights are public and are
+fetched on first boot into a Modal volume, so only the first container start
+pays for the download.
+
+### Repository secrets
+
+**Settings → Secrets and variables → Actions → Secrets.** These are the only
+values that need to be secret:
+
+| Secret | Required | Where it comes from |
+| --- | --- | --- |
+| `MODAL_TOKEN_ID` | yes | [modal.com/settings/tokens](https://modal.com/settings/tokens) → New token |
+| `MODAL_TOKEN_SECRET` | yes | Same page, shown alongside the ID |
+| `TURN_TOKEN_ID` | only with TURN | Cloudflare → Realtime → TURN → your key |
+| `TURN_API_TOKEN` | only with TURN | Same place |
+
+The deploy workflow pushes the two TURN values into a Modal secret named
+`facestream` on every run, so you never have to create it by hand.
+
+### Repository variables
+
+**Settings → Secrets and variables → Actions → Variables.** All optional — the
+defaults in the table are what you get if you set nothing.
+
+| Variable | Default | Set it when |
+| --- | --- | --- |
+| `FACESTREAM_GPU` | `L40S` | You want different hardware. See [Choosing compute](#choosing-compute). |
+| `FACESTREAM_REGION` | Modal picks | You know where your users are, e.g. `us-east-1`. |
+| `FACESTREAM_MIN_CONTAINERS` | `0` | You want no cold start. `1` keeps a GPU warm, and bills for it. |
+| `FACESTREAM_MAX_CONTAINERS` | unlimited | You want a ceiling on spend. |
+| `FACESTREAM_MAX_CONCURRENT_INPUTS` | `2` | You want viewers to share a GPU rather than get one each. |
+| `FACESTREAM_TIMEOUT` | `3600` | You want a shorter hard cap per session. |
+| `FACESTREAM_TURN` | `0` | Set to `1` to switch on Cloudflare TURN. |
+| `MODAL_ENVIRONMENT` | your default | Your Modal workspace has several environments. |
+| `FACESTREAM_URL` | unset | You want the deploy to verify `/healthz` afterwards, e.g. `https://facestream.example.com`. |
+
+A minimal production setup is four secrets-and-variables entries:
+`MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `FACESTREAM_MIN_CONTAINERS=1` and
+`FACESTREAM_MAX_CONTAINERS=4`.
+
+### What the workflows do
+
+- **CI** (on every pull request) — ruff, the unit tests, and a Chromium job
+  that drives the real page against a stub backend running the actual aiortc
+  peer connection. No GPU and no Modal account involved, so it runs on a
+  standard free runner.
+- **Deploy** (on push to `main`, or manually from the Actions tab) — runs lint
+  and unit tests, syncs the TURN secret if TURN is on, deploys to Modal, then
+  optionally checks `/healthz`. Deploys are serialised, so two pushes in quick
+  succession queue rather than race.
+
+To require approval before anything reaches production, add required reviewers
+to the `production` environment under **Settings → Environments**. The deploy
+job already targets it.
+
+To deploy without pushing code, use **Actions → Deploy → Run workflow**.
+
 ## How to run this yourself
+
+You only need this section if you want to deploy from your own machine rather
+than from GitHub.
 
 ### Prerequisites
 
@@ -287,6 +361,21 @@ FACESTREAM_MAX_CONTAINERS=4 \
 FACESTREAM_TURN=1 \
 uv run modal deploy -m facestream.main
 ```
+
+## Tests
+
+```
+uv run pytest -m "not browser"   # fast, no browser needed
+uv run playwright install chromium
+uv run pytest                    # everything, ~2 minutes
+```
+
+None of it needs a GPU or a Modal account. The browser tests drive the real
+page against [tests/stub_server.py](tests/stub_server.py), which speaks the same
+websocket protocol and runs the real aiortc peer connection and the real
+`ProcessFrameTrack`, with a cheap CPU tint standing in for the GPU swap. If you
+already have a Chromium build, point `FACESTREAM_CHROMIUM` at it instead of
+letting Playwright download one.
 
 ## Credits
 

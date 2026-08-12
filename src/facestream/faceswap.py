@@ -32,13 +32,24 @@ class FaceTracker:
     other's search window.
     """
 
-    __slots__ = ("last_bbox",)
+    __slots__ = ("last_bbox", "last_shape")
 
     def __init__(self):
         self.last_bbox: np.ndarray | None = None
+        self.last_shape: tuple[int, int] | None = None
 
     def reset(self):
         self.last_bbox = None
+
+    def note_frame_shape(self, shape: tuple[int, int]):
+        """Drop the tracked box when the frame size changes.
+
+        Browsers rescale mid-stream as their bandwidth estimate moves, which
+        leaves the remembered box in the previous resolution's coordinates.
+        """
+        if self.last_shape != shape:
+            self.last_shape = shape
+            self.reset()
 
 
 def paste_face_back(
@@ -234,6 +245,8 @@ class FaceSwap:
         actually makes detection cheaper -- and on a crop it still resolves the
         face at higher effective detail than a full-frame pass would.
         """
+        tracker.note_frame_shape(frame.shape[:2])
+
         if (
             config.FACE_TRACKING
             and self._det_is_dynamic

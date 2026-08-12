@@ -101,8 +101,9 @@ probably not the GPU:
 | `FACESTREAM_SCALEDOWN_WINDOW` | `300` | How long an idle container is kept. Longer means OBS scene switches reconnect instantly. |
 | `FACESTREAM_MIN_CONTAINERS` | `0` | Containers kept warm. `1` removes cold starts, and bills for it. |
 | `FACESTREAM_MAX_CONTAINERS` | unset | Ceiling on concurrent containers, i.e. on spend. |
-| `FACESTREAM_MAX_CONCURRENT_INPUTS` | `4` | Requests per container. Must stay above 1 — a live websocket holds one slot for the whole session. Extra streams share the same GPU. |
+| `FACESTREAM_MAX_CONCURRENT_INPUTS` | `2` | Requests per container. Must stay above 1 — a live websocket holds one slot for the whole session. At 2 each stream effectively gets its own GPU; raise it to share one. |
 | `FACESTREAM_REGION` | unset | Modal region, e.g. `us-east-1`. |
+| `FACESTREAM_TURN` | `0` | Relay through Cloudflare TURN. Needs the `facestream` Modal secret — see below. |
 | `FACESTREAM_DET_SIZE` | `640` | Detector input size. `320` is much cheaper but misses small faces. |
 | `FACESTREAM_TRACK_DET_SIZE` | `320` | Detector input size while tracking a face already found. |
 | `FACESTREAM_FACE_TRACKING` | `1` | Search a crop around the last known face instead of the whole frame. |
@@ -189,28 +190,102 @@ Start with `&stats=1` while you tune. If it reports a resolution below what you
 asked for, you are bandwidth limited, not GPU limited — lower `bitrate` or
 `res`.
 
-### Optional: TURN Server for Cellular Networks
+## Cloudflare
 
-On most cellular networks you need a TURN server for WebRTC to work. You can create a TURN app on [Cloudflare](https://developers.cloudflare.com/calls/turn/). To use those with this app you need to:
+### TURN, for cellular and locked-down networks
 
-1. Create a secret called `facestream` in modal with the following values:
+WebRTC needs a relay when neither end can be reached directly, which on most
+cellular networks and plenty of corporate wifi is the normal case. Without one
+the connection simply never establishes.
+
+1. Create a TURN key in
+   [Cloudflare Realtime](https://developers.cloudflare.com/realtime/turn/). You
+   get a Token ID and an API token.
+
+2. Put them in a Modal secret named `facestream`:
+
+   ```
+   uv run modal secret create facestream \
+       TURN_TOKEN_ID=your-turn-token-id \
+       TURN_API_TOKEN=your-turn-api-token
+   ```
+
+3. Deploy with TURN switched on:
+
+   ```
+   FACESTREAM_TURN=1 uv run modal deploy -m facestream.main
+   ```
+
+Leave `FACESTREAM_TURN` unset and the app runs on STUN alone — naming a Modal
+secret that doesn't exist fails the deploy, so this stays opt-in rather than
+something you edit in the source.
+
+Cloudflare only issues short-lived TURN credentials, so the backend mints a
+fresh set per session from your key. If Cloudflare is unreachable or the token
+is rejected, the session falls back to STUN and logs it rather than failing.
+Relayed traffic is billed per GB, so it is worth knowing that TURN is only used
+when a direct path can't be found.
+
+### Putting Cloudflare in front
+
+The page talks to whatever origin served it, so a custom domain works with no
+configuration: point `facestream.yourdomain.com` at the Modal deployment
+([Modal custom domains](https://modal.com/docs/guide/custom-domains)), proxy it
+through Cloudflare if you like, and the websocket follows.
+
+Two things worth knowing:
+
+- **Leave WebSocket support on** in Cloudflare (it is on by default). The whole
+  signalling path is one websocket.
+- Cloudflare closes idle websockets. The client heartbeats every 15s, so this
+  doesn't bite, but don't lengthen that interval past a minute.
+
+To serve the page from Cloudflare Pages while Modal keeps the GPU backend, host
+`web/index.html` on Pages and point it at the backend explicitly:
 
 ```
-TURN_TOKEN_ID=your-turn-token-id
-TURN_API_TOKEN=your-turn-api-token
+https://your-pages-site.com/?obs=1&face=rock&server=your-app.modal.run
 ```
 
-2.  Comment out the following line in [src/facestream/main.py](src/facestream/main.py):
+Nothing else needs configuring — the websocket handshake isn't subject to CORS.
+
+## Running in production
+
+- **Turn off cold starts.** `FACESTREAM_MIN_CONTAINERS=1` keeps a GPU warm so
+  the first connection doesn't sit through ~20s of container boot. This is the
+  single biggest difference between a demo and something that feels ready when
+  you hit it.
+- **Cap the spend.** `FACESTREAM_MAX_CONTAINERS` bounds how many GPUs can run
+  at once. Without it, a link that gets shared around scales as far as your
+  budget does.
+- **Decide how much GPU each viewer gets.** The default of
+  `FACESTREAM_MAX_CONCURRENT_INPUTS=2` gives each stream a container to itself.
+  Raise it to share a GPU between viewers and spend less, at the cost of frame
+  rate when more than one is connected.
+- **Set `FACESTREAM_REGION`** near your users. On a good GPU the network is the
+  larger share of end-to-end latency.
+- **Enable TURN** if anyone will connect over mobile data. See above.
+- **Watch it.** `GET /healthz` reports the live configuration. Container logs
+  carry a frame timing line every `FACESTREAM_STATS_INTERVAL` frames
+  (`swap stats: 29.4 fps over 150 frames, 21.3 ms/frame, 2 repeated, 0 dropped`)
+  — that is the number to watch when deciding whether a bigger GPU would help.
+- **Check the licensing.** The inswapper model this depends on is licensed for
+  **non-commercial use only** (see Credits). That applies to your deployment as
+  much as to the original project, so it rules out most commercial production
+  use regardless of how the infrastructure is set up.
+- **Get consent for the faces you use.** Swapping a real person's likeness onto
+  a live stream has legal exposure in many jurisdictions, and several platforms
+  have their own rules about synthetic likenesses.
+
+A reasonable production deploy ends up looking like:
 
 ```
-...
-secrets=[
-    modal.Secret.from_name(
-        "facestream",
-        required_keys=[SECRET_KEY_TURN_TOKEN_ID, SECRET_KEY_TURN_API_TOKEN],
-    )
-]
-...
+FACESTREAM_GPU=L40S \
+FACESTREAM_REGION=us-east-1 \
+FACESTREAM_MIN_CONTAINERS=1 \
+FACESTREAM_MAX_CONTAINERS=4 \
+FACESTREAM_TURN=1 \
+uv run modal deploy -m facestream.main
 ```
 
 ## Credits

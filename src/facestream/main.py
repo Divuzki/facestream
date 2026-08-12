@@ -5,7 +5,6 @@ import logging
 import os
 from functools import partial
 
-import aiohttp
 import cv2
 import fastapi
 import modal
@@ -15,7 +14,7 @@ from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.rtcicetransport import candidate_from_aioice
 from av.video.frame import VideoFrame
 
-from facestream import config
+from facestream import config, turn
 from facestream.constants import (
     MODEL_CACHE_DIR,
     SECRET_KEY_TURN_API_TOKEN,
@@ -37,6 +36,24 @@ web_image = (
 app = modal.App(name="facestream", image=web_image)
 
 
+def turn_secrets() -> list[modal.Secret]:
+    """The Cloudflare TURN secret, when TURN is switched on.
+
+    Naming a Modal secret that doesn't exist fails the deploy, so this is opt-in
+    through FACESTREAM_TURN rather than something you uncomment in the source.
+    """
+    if not config.TURN_ENABLED:
+        return []
+
+    logger.info("Cloudflare TURN enabled, expecting the 'facestream' secret")
+    return [
+        modal.Secret.from_name(
+            "facestream",
+            required_keys=[SECRET_KEY_TURN_TOKEN_ID, SECRET_KEY_TURN_API_TOKEN],
+        )
+    ]
+
+
 # All of these are tunable via FACESTREAM_* environment variables at deploy
 # time -- see facestream/config.py and the README.
 @app.cls(
@@ -56,16 +73,9 @@ app = modal.App(name="facestream", image=web_image)
             "facestream-model-cache", create_if_missing=True
         )
     },
-    # This secret is only required if you want to use a Cloudflare TURN server
-    # - which is required for most cellular networks.
-    # (See README.md for more information)
-    #
-    # secrets=[
-    #     modal.Secret.from_name(
-    #         "facestream",
-    #         required_keys=[SECRET_KEY_TURN_TOKEN_ID, SECRET_KEY_TURN_API_TOKEN],
-    #     )
-    # ],
+    # Empty unless FACESTREAM_TURN=1, which needs a Cloudflare TURN server --
+    # required for most cellular networks. (See README.md for more information)
+    secrets=turn_secrets(),
 )
 @modal.concurrent(max_inputs=config.MAX_CONCURRENT_INPUTS)
 class Main:
@@ -118,28 +128,10 @@ class Main:
 
         return on_track
 
-    async def _get_cloudflare_ice_servers(self):
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"https://rtc.live.cloudflare.com/v1/turn/keys/{self.turn_token_id}/credentials/generate",
-                headers={"Authorization": f"Bearer {self.turn_api_token}"},
-                json={"ttl": 86400},
-            ) as response:
-                data = await response.json()
-                return [data["iceServers"]]
-
     async def get_ice_servers(self):
-        # If we have Cloudflare TURN credentials, use them
-        # Otherwise, use Google STUN.
-
-        # NOTE: without a TURN server the stream will most likely not
-        # work on cellular networks.
-        if self.turn_api_token and self.turn_token_id:
-            logger.info("Using Cloudflare TURN servers")
-            return await self._get_cloudflare_ice_servers()
-        else:
-            logger.info("Using Google STUN")
-            return [{"urls": "stun:stun.l.google.com:19302"}]
+        # Without a TURN server the stream will most likely not work on
+        # cellular networks. See facestream/turn.py.
+        return await turn.get_ice_servers(self.turn_token_id, self.turn_api_token)
 
     @modal.asgi_app()
     def web(self):

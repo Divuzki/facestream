@@ -662,12 +662,17 @@
             : `wss://${override}`;
           return withScheme.replace(/\/+$/, "") + "/ws";
         }
-        if (window.location.hostname.includes("modal.run")) {
-          // Follow the page's own protocol so a self-hosted or local
-          // deployment over plain http still connects.
-          const scheme = window.location.protocol === "http:" ? "ws" : "wss";
+        // Same origin by default. The page is normally served by the backend
+        // itself, so this is right for a plain *.modal.run deployment, for a
+        // custom domain, and behind a Cloudflare proxy alike. Matching on
+        // "modal.run" instead would send anyone on their own domain to the
+        // upstream demo's backend. Following the page's protocol keeps a local
+        // http deployment working.
+        if (/^https?:$/.test(window.location.protocol)) {
+          const scheme = window.location.protocol === "https:" ? "wss" : "ws";
           return `${scheme}://${window.location.host}/ws`;
         }
+        // Opened straight off disk: nothing to be same-origin with.
         return "wss://philipp-eisen--facestream-main-web.modal.run/ws";
       }
 

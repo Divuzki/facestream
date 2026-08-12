@@ -85,9 +85,13 @@ SCALEDOWN_WINDOW = _env_int("FACESTREAM_SCALEDOWN_WINDOW", 300)
 
 # Concurrent inputs per container. This must stay above 1: a live websocket
 # occupies an input for the whole session, so a container with max_inputs=1
-# could not even serve index.html while someone is streaming. Note that each
-# extra concurrent stream shares the same GPU.
-MAX_CONCURRENT_INPUTS = _env_int("FACESTREAM_MAX_CONCURRENT_INPUTS", 4)
+# could not even serve index.html while someone is streaming.
+#
+# At 2, a page load and one stream fit together, and the next viewer's
+# websocket lands on a new container -- so in practice each stream gets a GPU
+# to itself. Raise it to share a GPU between streams and spend less, at the
+# cost of frame rate when more than one person is connected.
+MAX_CONCURRENT_INPUTS = _env_int("FACESTREAM_MAX_CONCURRENT_INPUTS", 2)
 
 # Keep containers warm to skip the ~20s cold start. Costs GPU time while idle,
 # so it is opt-in.
@@ -100,6 +104,11 @@ MAX_CONTAINERS = _env_opt_int("FACESTREAM_MAX_CONTAINERS")
 # WebRTC latency is dominated by network round trips, so pinning the deployment
 # near your viewers matters more than the GPU does. e.g. "us-east-1", "eu-west-1".
 REGION = _env_opt_str("FACESTREAM_REGION")
+
+# Relay media through Cloudflare's TURN service, which most cellular networks
+# need. Requires a Modal secret named "facestream" holding TURN_TOKEN_ID and
+# TURN_API_TOKEN; the deploy fails if it is missing, hence the opt-in.
+TURN_ENABLED = _env_bool("FACESTREAM_TURN", False)
 
 # --------------------------------------------------------------------------- #
 # Runtime settings (read inside the container, forwarded via RUNTIME_ENV)
@@ -169,6 +178,7 @@ def describe() -> dict[str, object]:
         "max_concurrent_inputs": MAX_CONCURRENT_INPUTS,
         "min_containers": MIN_CONTAINERS,
         "region": REGION,
+        "turn": TURN_ENABLED,
         "det_size": DET_SIZE,
         "track_det_size": TRACK_DET_SIZE,
         "face_tracking": FACE_TRACKING,

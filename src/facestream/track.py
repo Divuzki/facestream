@@ -10,6 +10,10 @@ from facestream import config
 
 logger = logging.getLogger(__name__)
 
+# How long to hold the very first frame waiting for the swap to come through.
+# Warmup means this normally resolves in a frame or two.
+FIRST_FRAME_TIMEOUT = 3.0
+
 
 class ProcessFrameTrack(MediaStreamTrack):
     """
@@ -55,18 +59,47 @@ class ProcessFrameTrack(MediaStreamTrack):
         try:
             _, processed_frame = self.output_queue.get_nowait()
             self.last_frame = processed_frame
-            return processed_frame
         except asyncio.QueueEmpty:
             if self.last_frame is None:
-                return original_frame
-            # Re-send the previous output, but stamped as the frame it stands in
-            # for. Handing the encoder a timestamp it has already seen makes the
-            # receiver's jitter buffer treat the packets as a duplicate of the
-            # earlier frame.
+                return await self._first_frame(original_frame)
             self._repeated_count += 1
-            self.last_frame.pts = original_frame.pts
-            self.last_frame.time_base = original_frame.time_base
-            return self.last_frame
+            processed_frame = self.last_frame
+
+        # Whatever we send stands in for the frame that just arrived, so it goes
+        # out on that frame's clock. A swapped frame carries the timestamp of
+        # the input it was computed from, which by now is behind timestamps
+        # already sent -- and a repeat would otherwise reuse one verbatim. Both
+        # leave the receiver's jitter buffer with a timestamp it has seen or
+        # passed, which it treats as a duplicate rather than a new frame.
+        #
+        # Mutating in place is safe: aiortc encodes each frame before asking
+        # for the next, so nothing is still reading the previous one.
+        processed_frame.pts = original_frame.pts
+        processed_frame.time_base = original_frame.time_base
+        return processed_frame
+
+    async def _first_frame(self, original_frame):
+        """Wait for the first swapped frame instead of sending a camera frame.
+
+        There is nothing to repeat at the start of a session, and passing the
+        camera frame through would put the real face on screen for the first
+        frames of every stream -- long enough to be caught on a recording.
+        """
+        try:
+            _, processed_frame = await asyncio.wait_for(
+                self.output_queue.get(), timeout=FIRST_FRAME_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            # Something is badly wrong upstream. A late unswapped frame beats a
+            # stalled connection, and the swap takes over as soon as it works.
+            logger.warning(
+                "No swapped frame within %ss, passing the camera through",
+                FIRST_FRAME_TIMEOUT,
+            )
+            return original_frame
+
+        self.last_frame = processed_frame
+        return processed_frame
 
     def _record_stats(self, elapsed: float):
         self._processed_count += 1
